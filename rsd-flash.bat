@@ -4,6 +4,7 @@ cd /d "%~dp0"
 
 REM Moto RSD Lite for Windows - launches PowerShell flasher
 REM Double-click this file, or run: rsd-flash.bat [firmware dir] [xml]
+chcp 65001 >nul
 
 where powershell >nul 2>nul
 if errorlevel 1 (

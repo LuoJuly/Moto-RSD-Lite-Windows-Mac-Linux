@@ -20,6 +20,15 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
+# Reduce mojibake on Chinese Windows (CP936) consoles.
+try {
+    if ($Host.Name -eq 'ConsoleHost') {
+        chcp 65001 > $null
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    }
+} catch {}
+
 $Fastboot = Join-Path $ScriptDir "files\fastboot.exe"
 $Adb = Join-Path $ScriptDir "files\adb.exe"
 $Version = "Windows"
@@ -190,6 +199,38 @@ function Add-FlashError {
     }
 }
 
+# fastboot writes normal progress/getvar output to stderr. With
+# $ErrorActionPreference=Stop, capturing 2>&1 turns those lines into
+# terminating ErrorRecords. Temporarily Continue around the native call.
+function Invoke-FastbootCommand([string[]]$FbArgs) {
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $fbRaw = & $Fastboot @FbArgs 2>&1
+        $fbRc = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+
+    $fbLines = @()
+    foreach ($item in @($fbRaw)) {
+        if ($null -eq $item) { continue }
+        if ($item -is [System.Management.Automation.ErrorRecord]) {
+            $s = $item.ToString()
+        } else {
+            $s = [string]$item
+        }
+        if ($s.Length -eq 0) { continue }
+        $fbLines += $s
+    }
+
+    return @{
+        ExitCode = $fbRc
+        Lines    = $fbLines
+        Text     = ($fbLines -join "`n")
+    }
+}
+
 function Invoke-Flash {
     if (-not (Test-Path -LiteralPath $Fastboot -PathType Leaf)) {
         throw "fastboot not found: $Fastboot"
@@ -203,7 +244,8 @@ function Invoke-Flash {
     Write-Host "XML file    : $XmlFile"
     Write-Host "Platform    : $Version"
     Write-Host "----------------------------------------------------------------------------"
-    Write-Host "Welcome to Moto RSD Lite For Windows, Mac and Linux — press Enter to start your flash"
+    # ASCII hyphen only - em dash becomes mojibake on CP936 consoles.
+    Write-Host "Welcome to Moto RSD Lite For Windows, Mac and Linux - press Enter to start your flash"
     Write-Host "----------------------------------------------------------------------------"
     [void](Read-Host)
 
@@ -241,30 +283,19 @@ function Invoke-Flash {
         if ($var) { $fbArgs += $var }
 
         Write-Host (">> fastboot {0}" -f ($fbArgs -join ' '))
-        $fbRaw = & $Fastboot @fbArgs 2>&1
-        $fbRc = $LASTEXITCODE
-        $fbLines = @()
-        foreach ($item in @($fbRaw)) {
-            if ($null -eq $item) { continue }
-            if ($item -is [System.Management.Automation.ErrorRecord]) {
-                $s = $item.ToString()
-            } else {
-                $s = [string]$item
-            }
-            if ($s.Length -eq 0) { continue }
-            $fbLines += $s
+        $fb = Invoke-FastbootCommand $fbArgs
+        foreach ($s in $fb.Lines) {
             if ($s -match '(?i)FAILED|error:') {
                 Write-Red $s
             } else {
                 Write-Host $s
             }
         }
-        $fbOut = ($fbLines -join "`n")
 
-        $fbBad = ($fbRc -ne 0) -or ($fbOut -match '(?i)(^|\s)FAILED(\s|$)|error:')
+        $fbBad = ($fb.ExitCode -ne 0) -or ($fb.Text -match '(?i)(^|\s)FAILED(\s|$)|error:')
         if ($fbBad) {
-            Add-FlashError ("fastboot failed: {0} (exit {1})" -f ($fbArgs -join ' '), $fbRc)
-            foreach ($eline in $fbLines) {
+            Add-FlashError ("fastboot failed: {0} (exit {1})" -f ($fbArgs -join ' '), $fb.ExitCode)
+            foreach ($eline in $fb.Lines) {
                 if ($eline -match '(?i)FAILED|error:') {
                     Add-FlashError -Quiet $eline
                 }
@@ -285,7 +316,7 @@ function Invoke-Flash {
     }
     Write-Host "---------------------------------------------------------"
     [void](Read-Host)
-    & $Fastboot reboot
+    $null = Invoke-FastbootCommand @("reboot")
 }
 
 try {
