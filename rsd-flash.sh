@@ -28,15 +28,31 @@ platform()
 	fi
 
 	if [ "$platform" = 'Darwin' ]; then
-		ADB="files/./adbosx"
-		FASTBOOT="files/./fastbootosx"
+		ADB="$SCRIPT_DIR/files/adbosx"
+		FASTBOOT="$SCRIPT_DIR/files/fastbootosx"
 		MD5SUM="md5 -r"
 		version="macOS"
 	else
-		ADB="files/./adblinux"
-		FASTBOOT="files/./fastbootlinux"
+		ADB="$SCRIPT_DIR/files/adblinux"
+		FASTBOOT="$SCRIPT_DIR/files/fastbootlinux"
 		MD5SUM="md5sum"
 		version="Linux"
+	fi
+
+	# Bundled names are adblinux/fastbootlinux (not adb/fastboot).
+	# Always use absolute paths so they still work after cd into the firmware folder.
+	for _bin in "$ADB" "$FASTBOOT"; do
+		if [ -f "$_bin" ] && [ ! -x "$_bin" ]; then
+			chmod +x "$_bin" 2>/dev/null || true
+		fi
+	done
+	if [ ! -f "$FASTBOOT" ]; then
+		echo "[-] fastboot not found: $FASTBOOT"
+		exit 1
+	fi
+	if [ ! -x "$FASTBOOT" ]; then
+		echo "[-] fastboot is not executable: $FASTBOOT"
+		exit 1
 	fi
 }
 
@@ -88,10 +104,19 @@ prompt_package_dir(){
 		PACKAGE_DIR=$(resolve_path "$PACKAGE_DIR")
 	fi
 
-	if [ ! -d "$PACKAGE_DIR" ]; then
-		echo "[-] Directory not found: $PACKAGE_DIR"
-		exit 1
+	# Directory named *.xml is a valid Motorola package folder; a real XML file
+	# means the user pasted the flash script instead of its parent directory.
+	if [ -d "$PACKAGE_DIR" ]; then
+		return
 	fi
+	if [ -f "$PACKAGE_DIR" ]; then
+		XML_FILE=$PACKAGE_DIR
+		PACKAGE_DIR=$(CDPATH= cd -- "$(dirname -- "$XML_FILE")" && pwd)
+		echo "[*] Using XML: $(xml_label "$XML_FILE")"
+		return
+	fi
+	echo "[-] Directory not found: $PACKAGE_DIR"
+	exit 1
 }
 
 list_xml_files(){
@@ -177,7 +202,9 @@ resolve_args(){
 	case $# in
 		0)
 			prompt_package_dir
-			pick_xml_interactive
+			if [ -z "$XML_FILE" ]; then
+				pick_xml_interactive
+			fi
 			;;
 		1)
 			arg1=$(resolve_path "$1")
@@ -254,10 +281,24 @@ $_msg"
 	fi
 }
 
+# XML filenames are relative to the firmware package directory
+package_file(){
+	_f=$1
+	[ -z "$_f" ] && return
+	case "$_f" in
+		/*) printf '%s\n' "$_f" ;;
+		*) printf '%s/%s\n' "$PACKAGE_DIR" "$_f" ;;
+	esac
+}
+
 do_flash(){
 	case "$FASTBOOT" in
 		/*) ;;
-		*) FASTBOOT="$SCRIPT_DIR/$FASTBOOT" ;;
+		*) FASTBOOT="$SCRIPT_DIR/files/${FASTBOOT##*/}" ;;
+	esac
+	case "$XML_FILE" in
+		/*) ;;
+		*) XML_FILE=$(package_file "$XML_FILE") ;;
 	esac
 
 	if [ ! -x "$FASTBOOT" ]; then
@@ -296,12 +337,16 @@ do_flash(){
 		op=$(getValue "$line" "operation")
 		part=$(getValue "$line" "partition")
 		var=$(getValue "$line" "var")
+		img=""
+		if [ -n "$file" ]; then
+			img=$(package_file "$file")
+		fi
 		if [ "$MD5" != "" ] && [ "$file" != "" ]; then
-			if [ ! -f "$file" ]; then
+			if [ ! -f "$img" ]; then
 				add_flash_error "$file: file not found in $PACKAGE_DIR"
 				break
 			fi
-			fileMD5=$($MD5SUM "$file" | sed 's/ \(.*\)//')
+			fileMD5=$($MD5SUM "$img" | sed 's/ \(.*\)//')
 			if [ "$MD5" != "$fileMD5" ]; then
 				add_flash_error "$file: MD5 mismatch (expected $MD5, got $fileMD5)."
 				break
@@ -309,8 +354,13 @@ do_flash(){
 		fi
 
 		fb_cmd=$(echo "$op $part $file $var" | sed 's/[[:space:]]*$//;s/^[[:space:]]*//;s/  */ /g')
+		# Empty XML attrs must be omitted; image path is quoted (may contain spaces).
 		# shellcheck disable=SC2086
-		fb_out=$("$FASTBOOT" $op $part $file $var 2>&1)
+		if [ -n "$img" ]; then
+			fb_out=$("$FASTBOOT" $op $part "$img" $var 2>&1)
+		else
+			fb_out=$("$FASTBOOT" $op $part $var 2>&1)
+		fi
 		fb_rc=$?
 		if [ -n "$fb_out" ]; then
 			printf '%s\n' "$fb_out" | while IFS= read -r ol; do

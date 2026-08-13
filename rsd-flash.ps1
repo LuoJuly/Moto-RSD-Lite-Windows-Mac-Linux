@@ -29,8 +29,8 @@ try {
     }
 } catch {}
 
-$Fastboot = Join-Path $ScriptDir "files\fastboot.exe"
-$Adb = Join-Path $ScriptDir "files\adb.exe"
+$Fastboot = Join-Path $ScriptDir (Join-Path "files" "fastboot.exe")
+$Adb = Join-Path $ScriptDir (Join-Path "files" "adb.exe")
 $Version = "Windows"
 $PackageDir = ""
 $XmlFile = ""
@@ -89,9 +89,16 @@ function Prompt-PackageDir {
     } else {
         $script:PackageDir = Resolve-UserPath $inputDir
     }
-    if (-not (Test-Path -LiteralPath $script:PackageDir -PathType Container)) {
-        throw "Directory not found: $($script:PackageDir)"
+    if (Test-Path -LiteralPath $script:PackageDir -PathType Container) {
+        return
     }
+    if (Test-Path -LiteralPath $script:PackageDir -PathType Leaf) {
+        $script:XmlFile = (Resolve-Path -LiteralPath $script:PackageDir).Path
+        $script:PackageDir = Split-Path -Parent $script:XmlFile
+        Write-Host "[*] Using XML: $(Get-XmlLabel $script:XmlFile)"
+        return
+    }
+    throw "Directory not found: $($script:PackageDir)"
 }
 
 function Pick-XmlInteractive {
@@ -127,7 +134,9 @@ function Pick-XmlInteractive {
 function Resolve-Args {
     if ([string]::IsNullOrWhiteSpace($Arg1)) {
         Prompt-PackageDir
-        Pick-XmlInteractive
+        if ([string]::IsNullOrWhiteSpace($script:XmlFile)) {
+            Pick-XmlInteractive
+        }
         return
     }
 
@@ -264,12 +273,17 @@ function Invoke-Flash {
         $part = Get-AttrValue $line "partition"
         $var = Get-AttrValue $line "var"
 
+        $img = $file
+        if ($file -and -not [System.IO.Path]::IsPathRooted($file)) {
+            $img = Join-Path $PackageDir $file
+        }
+
         if ($md5 -and $file) {
-            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath $img -PathType Leaf)) {
                 Add-FlashError "$file`: file not found in $PackageDir"
                 break
             }
-            $fileMd5 = Get-FileMd5 $file
+            $fileMd5 = Get-FileMd5 $img
             if ($md5.ToLowerInvariant() -ne $fileMd5) {
                 Add-FlashError "$file`: MD5 mismatch (expected $md5, got $fileMd5)."
                 break
@@ -279,7 +293,7 @@ function Invoke-Flash {
         $fbArgs = @()
         if ($op) { $fbArgs += $op }
         if ($part) { $fbArgs += $part }
-        if ($file) { $fbArgs += $file }
+        if ($file) { $fbArgs += $img }
         if ($var) { $fbArgs += $var }
 
         Write-Host (">> fastboot {0}" -f ($fbArgs -join ' '))
@@ -321,6 +335,9 @@ function Invoke-Flash {
 
 try {
     Show-Logo
+    if (-not (Test-Path -LiteralPath $Fastboot -PathType Leaf)) {
+        throw "fastboot not found: $Fastboot"
+    }
     Resolve-Args
     Invoke-Flash
 } catch {

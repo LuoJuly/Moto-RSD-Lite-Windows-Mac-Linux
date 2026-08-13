@@ -14,7 +14,12 @@ if errorlevel 1 (
 )
 
 if not exist "%~dp0files\fastboot.exe" (
-  echo [-] Missing files\fastboot.exe
+  echo [-] Missing "%~dp0files\fastboot.exe"
+  pause
+  exit /b 1
+)
+if not exist "%~dp0rsd-flash.ps1" (
+  echo [-] Missing "%~dp0rsd-flash.ps1"
   pause
   exit /b 1
 )
